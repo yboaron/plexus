@@ -1,0 +1,475 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared helpers for Plexus KIND cluster scripts.
+# Sourced by plexus-kind.sh and plexus-kind-multi.sh.
+
+set -euo pipefail
+
+PLEXUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OVN_KUBERNETES_PATH="${OVN_KUBERNETES_PATH:-}"
+OCI_BIN="${OCI_BIN:-docker}"
+
+# Keep in sync with ovn-kubernetes/contrib/kind-common.sh FRR constants.
+readonly FRR_K8S_GIT_REF="b43efcb206be"
+readonly FRR_K8S_UPSTREAM_FRR_IMAGE="quay.io/frrouting/frr:10.4.1"
+readonly FRR_K8S_ALL_IN_ONE_UPSTREAM_FRR_IMAGE="quay.io/frrouting/frr:10.4.3"
+readonly FRR_DEPLOYED_IMAGE="quay.io/frrouting/frr:10.6.0"
+readonly FRR_EXTERNAL_DEMO_IMAGE="${FRR_DEPLOYED_IMAGE}"
+FRR_K8S_FRR_IMAGE="${FRR_K8S_FRR_IMAGE:-${FRR_DEPLOYED_IMAGE}}"
+FRR_TMP_DIR=""
+
+resolve_ovn_kubernetes_path() {
+  if [ -n "$OVN_KUBERNETES_PATH" ] && [ -d "$OVN_KUBERNETES_PATH" ]; then
+    return
+  fi
+
+  local candidates=(
+    "${PLEXUS_DIR}/../ovn-kubernetes"
+  )
+  local gopath="${GOPATH:-}"
+  if [ -z "$gopath" ] && command -v go >/dev/null 2>&1; then
+    gopath=$(go env GOPATH 2>/dev/null || true)
+  fi
+  if [ -n "$gopath" ]; then
+    IFS=: read -ra entries <<< "$gopath"
+    for entry in "${entries[@]}"; do
+      candidates+=("${entry}/src/github.com/ovn-kubernetes/ovn-kubernetes")
+    done
+  fi
+
+  for path in "${candidates[@]}"; do
+    if [ -d "$path/helm/ovn-kubernetes" ]; then
+      OVN_KUBERNETES_PATH="$(cd "$path" && pwd)"
+      return
+    fi
+  done
+
+  echo "error: cannot locate ovn-kubernetes checkout (set OVN_KUBERNETES_PATH)" >&2
+  exit 1
+}
+
+# compute_cidrs INDEX
+# Pod and Service CIDRs must be unique per cluster (routed across clusters via EVPN).
+# Join, transit, and masquerade are cluster-internal and can safely overlap.
+# Each cluster gets its own Docker network subnet for L2 isolation.
+compute_cidrs() {
+  local idx=$1
+  POD_CIDR="10.$((244 + idx)).0.0/16"
+  POD_NETWORK="10.$((244 + idx)).0.0/16/24"
+  SVC_CIDR="10.$((96 + idx)).0.0/16"
+  JOIN_SUBNET="100.64.0.0/16"
+  TRANSIT_SUBNET="100.88.0.0/16"
+  MASQ_SUBNET="169.254.0.0/17"
+  DOCKER_NETWORK_SUBNET="192.168.$((10 + idx)).0/24"
+}
+
+docker_network_cidr() {
+  local name=$1
+  $OCI_BIN network inspect "$name" --format '{{(index .IPAM.Config 0).Subnet}}'
+}
+
+create_docker_network() {
+  local name=$1 subnet=$2
+  if ! $OCI_BIN network inspect "$name" >/dev/null 2>&1; then
+    echo "Creating Docker network ${name} (${subnet})..."
+    $OCI_BIN network create "$name" --subnet "$subnet"
+  else
+    echo "Docker network ${name} already exists"
+  fi
+}
+
+generate_kind_config() {
+  local workers=$1 pod_cidr=$2 svc_cidr=$3
+  cat <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  kubeProxyMode: "none"
+  podSubnet: "${pod_cidr}"
+  serviceSubnet: "${svc_cidr}"
+nodes:
+  - role: control-plane
+EOF
+  for ((i = 0; i < workers; i++)); do
+    echo "  - role: worker"
+  done
+}
+
+# detect_api_url CLUSTER_NAME DOCKER_NETWORK -> https://<container-ip>:6443
+detect_api_url() {
+  local name=$1 network=${2:-kind}
+  local ip
+  ip=$($OCI_BIN inspect -f "{{(index .NetworkSettings.Networks \"${network}\").IPAddress}}" "${name}-control-plane")
+  echo "https://${ip}:6443"
+}
+
+# get_node_ips CLUSTER_NAME DOCKER_NETWORK (one per line)
+get_node_ips() {
+  local name=$1 network=${2:-kind}
+  for node in $(kind get nodes --name "$name"); do
+    $OCI_BIN inspect -f "{{(index .NetworkSettings.Networks \"${network}\").IPAddress}}" "$node"
+  done
+}
+
+build_ovn_image() {
+  local image_name="localhost/ovn-daemonset-fedora:dev"
+  if [ "${FORCE_BUILD:-false}" != true ] && $OCI_BIN image inspect "$image_name" >/dev/null 2>&1; then
+    echo "OVN image ${image_name} already exists, skipping build (use --force-build to rebuild)"
+    OVN_IMAGE="$image_name"
+    return
+  fi
+  echo "Building OVN-Kubernetes image..."
+  make -C "${OVN_KUBERNETES_PATH}/dist/images" \
+    IMAGE="$image_name" \
+    OCI_BIN="$OCI_BIN" \
+    fedora-image
+  OVN_IMAGE="$image_name"
+}
+
+load_ovn_image() {
+  local name=$1
+  echo "Loading OVN image into cluster ${name}..."
+  kind load docker-image "$OVN_IMAGE" --name "$name"
+}
+
+# Adapted from ovn-kubernetes/contrib/kind-common.sh: enable_multi_net(),
+# install_online_ovn_kubernetes_crds().
+install_ovnk_crds() {
+  local kubeconfig=$1
+  echo "Installing OVN-Kubernetes prerequisite CRDs..."
+
+  local multus_version="v4.1.3"
+  echo "  Multus CNI ${multus_version} (provides NetworkAttachmentDefinition CRD)..."
+  wget -qO- "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${multus_version}/deployments/multus-daemonset.yml" | \
+    sed -e "s|multus-cni:snapshot|multus-cni:${multus_version}|g" | \
+    KUBECONFIG="$kubeconfig" kubectl apply -f -
+
+  echo "  Multi-network-policy CRD..."
+  KUBECONFIG="$kubeconfig" kubectl apply -f \
+    "https://raw.githubusercontent.com/k8snetworkplumbingwg/multi-networkpolicy/refs/tags/v1.0.1/scheme.yml"
+
+  echo "  IPAMClaim CRD..."
+  KUBECONFIG="$kubeconfig" kubectl apply -f \
+    "https://raw.githubusercontent.com/k8snetworkplumbingwg/ipamclaims/v0.5.1-alpha/artifacts/k8s.cni.cncf.io_ipamclaims.yaml"
+
+  echo "  AdminNetworkPolicy + BaselineAdminNetworkPolicy CRDs..."
+  KUBECONFIG="$kubeconfig" kubectl apply -f \
+    "https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/v0.1.5/config/crd/experimental/policy.networking.k8s.io_adminnetworkpolicies.yaml"
+  KUBECONFIG="$kubeconfig" kubectl apply -f \
+    "https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/v0.1.5/config/crd/experimental/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml"
+}
+
+helm_install_ovnk() {
+  local name=$1 kubeconfig=$2 network=${3:-kind}
+  local api_url
+  api_url=$(detect_api_url "$name" "$network")
+
+  install_ovnk_crds "$kubeconfig"
+
+  echo "Installing OVN-Kubernetes via Helm into ${name}..."
+  local helm_chart="${OVN_KUBERNETES_PATH}/helm/ovn-kubernetes"
+  local values_file="${helm_chart}/values-single-node-zone.yaml"
+
+  KUBECONFIG="$kubeconfig" helm upgrade --install ovn-kubernetes "$helm_chart" \
+    -f "$values_file" \
+    --set k8sAPIServer="${api_url}" \
+    --set podNetwork="${POD_NETWORK}" \
+    --set serviceNetwork="${SVC_CIDR}" \
+    --set mtu=1400 \
+    --set global.image.repository="${OVN_IMAGE%:*}" \
+    --set global.image.tag="${OVN_IMAGE##*:}" \
+    --set global.gatewayMode=local \
+    --set global.enableMultiNetwork=true \
+    --set global.enableNetworkSegmentation=true \
+    --set global.enableNetworkConnect=true \
+    --set global.enableRouteAdvertisements=true \
+    --set global.enableEVPN=true \
+    --set global.enableAdminNetworkPolicy=true \
+    --set global.enablePersistentIPs=true \
+    --set global.enableDynamicUDNAllocation=true \
+    --set-string global.v4JoinSubnet="${JOIN_SUBNET}" \
+    --set-string global.v4TransitSubnet="${TRANSIT_SUBNET}" \
+    --set-string global.v4MasqueradeSubnet="${MASQ_SUBNET}"
+}
+
+# Adapted from ovn-kubernetes/contrib/kind-common.sh: clone_frr().
+# Clones metallb/frr-k8s, applies ovn-kubernetes patches, bumps the FRR image,
+# and renames the container to plexus-frr.
+# Sets FRR_TMP_DIR to the temp directory containing the clone.
+clone_frr_k8s() {
+  [ -n "$FRR_TMP_DIR" ] && [ -d "$FRR_TMP_DIR" ] && return
+
+  FRR_TMP_DIR=$(mktemp -d)
+  trap 'rm -rf $FRR_TMP_DIR' EXIT
+
+  pushd "$FRR_TMP_DIR" >/dev/null
+  git clone --quiet --no-tags --single-branch --branch main https://github.com/metallb/frr-k8s
+  pushd frr-k8s >/dev/null
+  git checkout --quiet --detach "$FRR_K8S_GIT_REF"
+  popd >/dev/null
+
+  # Download OVN-K patches (route-reflector-client support, etc.)
+  curl -Ls https://github.com/jcaamano/frr-k8s/archive/refs/heads/ovnk-bgp-v0.0.21.tar.gz \
+    | tar xzf - frr-k8s-ovnk-bgp-v0.0.21/patches --strip-components 1
+
+  pushd frr-k8s >/dev/null
+  # Normalize the image tag so the OVN-K patch context applies cleanly
+  sed -i 's|quay.io/frrouting/frr:10.4.3|quay.io/frrouting/frr:9.1.0|g' hack/demo/demo.sh
+  git apply ../patches/*
+
+  # Bump the external demo container to FRR 10.6.0 (fixes EVPN + coredump issues)
+  sed -i "s|${FRR_K8S_UPSTREAM_FRR_IMAGE}|${FRR_EXTERNAL_DEMO_IMAGE}|g" hack/demo/demo.sh
+
+  # Rename the container from 'frr' to 'plexus-frr' so we don't collide
+  # with an existing ovn-kubernetes kind cluster's FRR container.
+  sed -i 's/--name frr\b/--name plexus-frr/g' hack/demo/demo.sh
+  sed -i 's/docker rm -f frr$/docker rm -f plexus-frr/' hack/demo/demo.sh
+  sed -i 's/" frr)/" plexus-frr)/' hack/demo/demo.sh
+
+  popd >/dev/null
+  popd >/dev/null
+}
+
+# Adapted from ovn-kubernetes/contrib/kind-common.sh: deploy_frr_external_container().
+# Uses frr-k8s's demo.sh to create the external FRR container, then configures
+# EVPN on the running instance.
+deploy_external_frr() {
+  local kubeconfig=$1; shift
+  local node_ips=("$@")
+
+  if $OCI_BIN ps --format '{{.Names}}' | grep -Eq '^plexus-frr$'; then
+    echo "External FRR (plexus-frr) already running, reusing"
+    if [ ${#node_ips[@]} -gt 0 ]; then
+      add_frr_neighbors "${node_ips[@]}"
+    fi
+    return
+  fi
+
+  echo "Deploying external FRR route reflector via frr-k8s demo..."
+  clone_frr_k8s
+
+  pushd "${FRR_TMP_DIR}/frr-k8s/hack/demo" >/dev/null
+
+  # demo.sh uses 'kubectl get nodes' to discover IPs; point it at our cluster
+  KUBECONFIG="$kubeconfig" ./demo.sh
+  popd >/dev/null
+
+  # Wait for FRR daemons inside the container
+  echo "Waiting for FRR daemons to start..."
+  local attempts=0
+  while ! $OCI_BIN exec plexus-frr vtysh -c "show daemons" >/dev/null 2>&1; do
+    if (( ++attempts > 30 )); then
+      echo "error: FRR daemons did not start after 30s"
+      exit 1
+    fi
+    sleep 1
+  done
+
+  # Configure EVPN on the external FRR, same as ovn-kubernetes does when
+  # ENABLE_EVPN=true: activate all neighbors in l2vpn evpn address-family
+  # and set them as route-reflector-clients.
+  echo "Configuring EVPN on external FRR..."
+  local bgp_neighbors vtysh_cmds
+  bgp_neighbors=$($OCI_BIN exec plexus-frr vtysh -c "show running-config" \
+    | grep "^ neighbor.*remote-as" | awk '{print $2}')
+  vtysh_cmds=(-c "configure terminal" -c "router bgp 64512" -c "address-family l2vpn evpn")
+  for neighbor in $bgp_neighbors; do
+    vtysh_cmds+=(-c "neighbor $neighbor activate")
+    vtysh_cmds+=(-c "neighbor $neighbor route-reflector-client")
+  done
+  vtysh_cmds+=(-c "advertise-all-vni" -c "exit-address-family" -c "end" -c "write memory")
+  $OCI_BIN exec plexus-frr vtysh "${vtysh_cmds[@]}"
+  echo "FRR route reflector is running with EVPN"
+}
+
+# add_frr_neighbors IPS...
+# Adds new BGP neighbors to the already-running plexus-frr container
+# (used by multi-cluster to expand the neighbor set after initial creation).
+add_frr_neighbors() {
+  local ips=("$@")
+  echo "Adding ${#ips[@]} BGP neighbor(s) to external FRR..."
+
+  local vtysh_cmds=(-c "configure terminal" -c "router bgp 64512")
+  for ip in "${ips[@]}"; do
+    vtysh_cmds+=(-c "neighbor ${ip} remote-as 64512")
+  done
+
+  vtysh_cmds+=(-c "address-family l2vpn evpn")
+  for ip in "${ips[@]}"; do
+    vtysh_cmds+=(-c "neighbor ${ip} activate")
+    vtysh_cmds+=(-c "neighbor ${ip} route-reflector-client")
+  done
+  vtysh_cmds+=(-c "exit-address-family")
+
+  vtysh_cmds+=(-c "address-family ipv4 unicast")
+  for ip in "${ips[@]}"; do
+    vtysh_cmds+=(-c "neighbor ${ip} activate")
+    vtysh_cmds+=(-c "neighbor ${ip} route-reflector-client")
+  done
+  vtysh_cmds+=(-c "exit-address-family")
+
+  vtysh_cmds+=(-c "end" -c "write memory")
+
+  $OCI_BIN exec plexus-frr vtysh "${vtysh_cmds[@]}"
+  echo "BGP neighbors configured"
+}
+
+# Adapted from ovn-kubernetes/contrib/kind-common.sh: install_frr_k8s().
+install_frr_k8s() {
+  local kubeconfig=$1
+  echo "Installing FRR-K8s in-cluster..."
+  clone_frr_k8s
+
+  KUBECONFIG="$kubeconfig" kubectl apply -f "${FRR_TMP_DIR}/frr-k8s/charts/frr-k8s/charts/crds/templates/"
+
+  # Replace the upstream FRR image reference in the all-in-one manifest with
+  # the version we actually deploy (10.6.0), matching ovn-kubernetes.
+  sed -i "s|${FRR_K8S_ALL_IN_ONE_UPSTREAM_FRR_IMAGE}|${FRR_K8S_FRR_IMAGE}|g" \
+    "${FRR_TMP_DIR}/frr-k8s/config/all-in-one/frr-k8s.yaml"
+  # gcr.io/kubebuilder/kube-rbac-proxy is gone; use the k8s.io mirror.
+  sed -i 's|gcr.io/kubebuilder/kube-rbac-proxy|registry.k8s.io/kubebuilder/kube-rbac-proxy|g' \
+    "${FRR_TMP_DIR}/frr-k8s/config/all-in-one/frr-k8s.yaml"
+
+  KUBECONFIG="$kubeconfig" kubectl apply -f "${FRR_TMP_DIR}/frr-k8s/config/all-in-one/frr-k8s.yaml"
+
+  echo "Waiting for FRR-K8s to be ready..."
+  KUBECONFIG="$kubeconfig" kubectl rollout status -n frr-k8s-system daemonset frr-k8s-daemon --timeout 5m || true
+}
+
+# Adapted from ovn-kubernetes/contrib/kind-common.sh: apply_frr_k8s_receive_config().
+configure_frr_k8s_peering() {
+  local kubeconfig=$1 cluster_name=$2
+
+  echo "Waiting for FRR-K8s webhook to become ready..."
+  # The webhook declares readiness before its endpoint is actually serving,
+  # so curl from inside the control-plane node to verify.
+  local r=0
+  timeout 120s bash -x <<PROBE || r=$?
+while true; do
+  CLUSTER_IP=\$(KUBECONFIG="$kubeconfig" kubectl get svc -n frr-k8s-system frr-k8s-webhook-service -o jsonpath='{.spec.clusterIP}')
+  $OCI_BIN exec "${cluster_name}-control-plane" curl -ksS --connect-timeout 0.1 "https://\${CLUSTER_IP}" && exit 0
+  echo "Waiting for frr-k8s webhook..."
+  sleep 1
+done
+PROBE
+  if [ "$r" -ne 0 ]; then
+    KUBECONFIG="$kubeconfig" kubectl describe pod -n frr-k8s-system -l app=frr-k8s-webhook-server
+    KUBECONFIG="$kubeconfig" kubectl logs -n frr-k8s-system -l app=frr-k8s-webhook-server
+  fi
+
+  echo "Applying FRR-K8s peering config..."
+  clone_frr_k8s
+  local config="${FRR_TMP_DIR}/frr-k8s/hack/demo/configs/receive_all.yaml"
+  # Our Docker networks are IPv4-only; strip any IPv6 neighbor entries that
+  # demo.sh populated with "invalid IP" to avoid webhook rejection.
+  sed -i '/"invalid IP"/d' "$config"
+  sed -i '/invalid IP/d' "$config"
+  KUBECONFIG="$kubeconfig" kubectl apply -n frr-k8s-system -f "$config"
+}
+
+build_plexus_image() {
+  local image_name="localhost/plexus-controller:dev"
+  if [ "${FORCE_BUILD:-false}" != true ] && $OCI_BIN image inspect "$image_name" >/dev/null 2>&1; then
+    echo "Plexus image ${image_name} already exists, skipping build (use --force-build to rebuild)"
+    PLEXUS_IMAGE="$image_name"
+    return
+  fi
+  echo "Building Plexus controller image..."
+  $OCI_BIN build -t "$image_name" "$PLEXUS_DIR"
+  PLEXUS_IMAGE="$image_name"
+}
+
+deploy_plexus_controller() {
+  local cluster_name=$1 kubeconfig=$2
+  shift 2
+  local vtep_cidrs=("$@")
+
+  echo "Loading Plexus image into cluster ${cluster_name}..."
+  kind load docker-image "$PLEXUS_IMAGE" --name "$cluster_name"
+
+  local helm_args=(
+    --set image.repository="${PLEXUS_IMAGE%:*}"
+    --set image.tag="${PLEXUS_IMAGE##*:}"
+    --set image.pullPolicy=Never
+  )
+  if [ ${#vtep_cidrs[@]} -gt 0 ]; then
+    local vtep_json
+    vtep_json=$(printf ',"%s"' "${vtep_cidrs[@]}")
+    helm_args+=(--set-json "ovnKubernetes.vtepCIDRs=[${vtep_json:1}]")
+  fi
+
+  echo "Installing Plexus via Helm into ${cluster_name}..."
+  KUBECONFIG="$kubeconfig" helm upgrade --install plexus "${PLEXUS_DIR}/helm/plexus" "${helm_args[@]}"
+
+  echo "Waiting for Plexus controller..."
+  KUBECONFIG="$kubeconfig" kubectl rollout status deployment -n plexus-system plexus-controller --timeout 2m || true
+}
+
+wait_for_ovnk() {
+  local kubeconfig=$1
+  echo "Waiting for OVN-Kubernetes pods..."
+  KUBECONFIG="$kubeconfig" kubectl rollout status daemonset -n ovn-kubernetes ovs-node --timeout 5m || true
+  KUBECONFIG="$kubeconfig" kubectl rollout status deployment -n ovn-kubernetes ovnkube-control-plane --timeout 5m || true
+  KUBECONFIG="$kubeconfig" kubectl rollout status daemonset -n ovn-kubernetes ovnkube-node --timeout 5m || true
+}
+
+connect_frr_to_network() {
+  local network=$1
+  if ! $OCI_BIN network inspect "$network" >/dev/null 2>&1; then
+    echo "error: Docker network ${network} does not exist" >&2
+    return 1
+  fi
+  if $OCI_BIN inspect plexus-frr -f "{{(index .NetworkSettings.Networks \"${network}\").IPAddress}}" 2>/dev/null | grep -q .; then
+    echo "FRR already connected to ${network}"
+    return
+  fi
+  echo "Connecting FRR to Docker network ${network}..."
+  $OCI_BIN network connect "$network" plexus-frr
+}
+
+cleanup_external_frr() {
+  if $OCI_BIN ps -a --format '{{.Names}}' | grep -Eq '^plexus-frr$'; then
+    echo "Removing external FRR container..."
+    $OCI_BIN rm -f plexus-frr
+  fi
+}
+
+delete_docker_network() {
+  local name=$1
+  if $OCI_BIN network inspect "$name" >/dev/null 2>&1; then
+    echo "Removing Docker network ${name}..."
+    $OCI_BIN network rm "$name" 2>/dev/null || true
+  fi
+}
+
+create_spoke_secret() {
+  local hub_kubeconfig=$1 spoke_name=$2 spoke_index=$3 spoke_network=${4:-kind}
+
+  local spoke_api_url
+  spoke_api_url=$(detect_api_url "$spoke_name" "$spoke_network")
+
+  echo "Creating spoke Secret for ${spoke_name} on hub..."
+
+  local raw_kubeconfig
+  raw_kubeconfig=$(kind get kubeconfig --name "$spoke_name")
+
+  local patched_kubeconfig
+  patched_kubeconfig=$(echo "$raw_kubeconfig" | sed "s|server: https://127.0.0.1:[0-9]*|server: ${spoke_api_url}|")
+
+  KUBECONFIG="$hub_kubeconfig" kubectl create namespace plexus-system 2>/dev/null || true
+
+  echo "$patched_kubeconfig" | \
+    KUBECONFIG="$hub_kubeconfig" kubectl create secret generic "${spoke_name}" \
+      --namespace=plexus-system \
+      --from-file=kubeconfig=/dev/stdin \
+      --dry-run=client -o yaml | \
+    KUBECONFIG="$hub_kubeconfig" kubectl apply -f -
+
+  KUBECONFIG="$hub_kubeconfig" kubectl label secret "${spoke_name}" \
+    --namespace=plexus-system \
+    --overwrite \
+    plexus.io/cluster=true \
+    topology.kubernetes.io/zone="spoke-${spoke_index}"
+}
