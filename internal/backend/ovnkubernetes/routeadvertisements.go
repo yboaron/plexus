@@ -15,21 +15,21 @@ import (
 )
 
 func raName(and *v1beta1.AdministrativeNetworkDomain) string {
-	return fmt.Sprintf("%s-public", and.Name)
+	return and.Name
 }
 
 func (b *OVNKubernetesBackend) reconcileRouteAdvertisements(ctx context.Context, and *v1beta1.AdministrativeNetworkDomain, cl client.Client) error {
-	hasPublic := false
+	hasEVPN := false
 	for i := range and.Spec.Subnets {
-		if and.Spec.Subnets[i].Type == v1beta1.SubnetTypePublic {
-			hasPublic = true
+		if and.Spec.Subnets[i].Type != v1beta1.SubnetTypeIsolated {
+			hasEVPN = true
 			break
 		}
 	}
 
 	name := raName(and)
 
-	if !hasPublic {
+	if !hasEVPN {
 		return b.deleteRouteAdvertisementsByName(ctx, name, cl)
 	}
 
@@ -81,7 +81,13 @@ func (b *OVNKubernetesBackend) buildRouteAdvertisements(and *v1beta1.Administrat
 						NetworkSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								labelNetworkDomain: and.Name,
-								labelSubnetType:    string(v1beta1.SubnetTypePublic),
+							},
+							MatchExpressions: []metav1.LabelSelectorRequirement{
+								{
+									Key:      labelSubnetType,
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{string(v1beta1.SubnetTypePublic), string(v1beta1.SubnetTypePrivate)},
+								},
 							},
 						},
 					},

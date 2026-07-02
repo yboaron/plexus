@@ -67,14 +67,14 @@ func (b *OVNKubernetesBackend) checkClusterResourceStatus(ctx context.Context, a
 		}
 	}
 
-	hasPublic := false
+	hasEVPN := false
 	for i := range and.Spec.Subnets {
-		if and.Spec.Subnets[i].Type == v1beta1.SubnetTypePublic {
-			hasPublic = true
+		if and.Spec.Subnets[i].Type != v1beta1.SubnetTypeIsolated {
+			hasEVPN = true
 			break
 		}
 	}
-	if hasPublic {
+	if hasEVPN {
 		name := raName(and)
 		ra := &rav1.RouteAdvertisements{}
 		if err := cl.Get(ctx, client.ObjectKey{Name: name}, ra); err != nil {

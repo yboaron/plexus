@@ -113,6 +113,20 @@ get_node_ips() {
   done
 }
 
+# TODO: OVN-K should set rp_filter=2 on SVL interfaces it creates.
+# See https://github.com/ovn-kubernetes/ovn-kubernetes/issues/6631
+# Until that's fixed, we disable strict rp_filter on all nodes so that
+# EVPN inter-VRF traffic (arriving on svl3.X with a source IP from a
+# different subnet) is not dropped by reverse-path filtering.
+configure_node_sysctl() {
+  local name=$1
+  echo "Configuring sysctl rp_filter=2 (loose) on cluster ${name} nodes..."
+  for node in $(kind get nodes --name "$name"); do
+    $OCI_BIN exec "$node" sysctl -w net.ipv4.conf.all.rp_filter=2
+    $OCI_BIN exec "$node" sysctl -w net.ipv4.conf.default.rp_filter=2
+  done
+}
+
 build_ovn_image() {
   local image_name="localhost/ovn-daemonset-fedora:dev"
   if [ "${FORCE_BUILD:-false}" != true ] && $OCI_BIN image inspect "$image_name" >/dev/null 2>&1; then
@@ -189,6 +203,7 @@ helm_install_ovnk() {
     --set global.enableAdminNetworkPolicy=true \
     --set global.enablePersistentIPs=true \
     --set global.enableDynamicUDNAllocation=true \
+    --set global.advertisedUDNIsolationMode=loose \
     --set-string global.v4JoinSubnet="${JOIN_SUBNET}" \
     --set-string global.v4TransitSubnet="${TRANSIT_SUBNET}" \
     --set-string global.v4MasqueradeSubnet="${MASQ_SUBNET}"

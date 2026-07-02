@@ -109,15 +109,16 @@ func NewVNIAllocator() *VNIAllocator {
 // SubnetVNIs holds the allocated VNI(s) for a single subnet.
 type SubnetVNIs struct {
 	MACVRF int
-	IPVRF  int // zero if not applicable (Private/Isolated)
+	IPVRF  int // zero for Isolated subnets only
 }
 
 func subnetKey(andName, subnetName, vrfType string) string {
 	return andName + "/" + subnetName + "/" + vrfType
 }
 
-// AllocateSubnetVNIs allocates VNIs for a subnet. Public subnets get
-// both MACVRF and IPVRF VNIs; all other types get only a MACVRF VNI.
+// AllocateSubnetVNIs allocates VNIs for a subnet. Public and Private
+// subnets get both MACVRF and IPVRF VNIs (Private needs ipVRF for
+// intra-domain route leaking); Isolated subnets get only a MACVRF VNI.
 // Allocations are idempotent — calling with the same key returns the
 // previously allocated VNIs.
 //
@@ -137,7 +138,7 @@ func (a *VNIAllocator) AllocateSubnetVNIs(andName, subnetName string, subnetType
 		MACVRF: macVNI,
 	}
 
-	if subnetType == v1beta1.SubnetTypePublic {
+	if subnetType != v1beta1.SubnetTypeIsolated {
 		ipVNI, err := a.allocator.AllocateID(subnetKey(andName, subnetName, "ipvrf"))
 		if err != nil {
 			return SubnetVNIs{}, err

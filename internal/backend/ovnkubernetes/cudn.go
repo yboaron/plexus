@@ -12,6 +12,7 @@ package ovnkubernetes
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,12 +25,27 @@ import (
 
 const vtepName = "nd-vtep"
 
+// domainRouteTarget returns a shared route target string for all subnets
+// within an AND. Using a wildcard AS (`*`) allows import matching regardless
+// of which ASN originated the route. The local admin portion is a
+// deterministic hash of the AND name (range 1-65535).
+func domainRouteTarget(andName string) string {
+	h := fnv.New32a()
+	h.Write([]byte(andName))
+	local := (h.Sum32() % 65535) + 1
+	return fmt.Sprintf("*:%d", local)
+}
+
 // cudnName returns the deterministic CUDN name for a subnet.
 func cudnName(and *v1beta1.AdministrativeNetworkDomain, subnet *v1beta1.Subnet) string {
 	return fmt.Sprintf("%s-%s", and.Name, subnet.Name)
 }
 
 // buildCUDN constructs the desired ClusterUserDefinedNetwork for a subnet.
+// Non-Isolated subnets get an ipVRF with a shared route target to enable
+// intra-domain route leaking (all subnets in the same AND can reach each
+// other at L3). The shared route target causes FRR to import Type 2 host
+// routes across ipVRFs via symmetric IRB.
 func (b *OVNKubernetesBackend) buildCUDN(
 	and *v1beta1.AdministrativeNetworkDomain,
 	subnet *v1beta1.Subnet,
@@ -46,9 +62,10 @@ func (b *OVNKubernetesBackend) buildCUDN(
 			VNI: int32(vnis.MACVRF),
 		},
 	}
-	if subnet.Type == v1beta1.SubnetTypePublic {
+	if subnet.Type != v1beta1.SubnetTypeIsolated && vnis.IPVRF != 0 {
 		evpnConfig.IPVRF = &udnv1.VRFConfig{
-			VNI: int32(vnis.IPVRF),
+			VNI:         int32(vnis.IPVRF),
+			RouteTarget: udnv1.RouteTargetString(domainRouteTarget(and.Name)),
 		}
 	}
 

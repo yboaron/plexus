@@ -80,6 +80,7 @@ else
 fi
 
 load_ovn_image "$CLUSTER_NAME"
+configure_node_sysctl "$CLUSTER_NAME"
 
 deploy_external_frr "$KUBECONFIG_FILE"
 install_frr_k8s "$KUBECONFIG_FILE"

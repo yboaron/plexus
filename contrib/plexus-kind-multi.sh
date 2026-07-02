@@ -104,6 +104,7 @@ create_cluster() {
   fi
 
   load_ovn_image "$name"
+  configure_node_sysctl "$name"
 }
 
 CIDR_BASE="${CIDR_BASE:-1}"
