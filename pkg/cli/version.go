@@ -2,13 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
-)
-
-var (
-	Version   = "dev"
-	GitCommit = "unknown"
 )
 
 func newVersionCommand() *cobra.Command {
@@ -17,7 +13,20 @@ func newVersionCommand() *cobra.Command {
 		Short: "Print the plexus CLI version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "plexus version %s (commit: %s)\n", Version, GitCommit)
+			info, ok := debug.ReadBuildInfo()
+			version := "dev"
+			commit := "unknown"
+			goVersion := "unknown"
+			if ok {
+				version = info.Main.Version
+				goVersion = info.GoVersion
+				for _, setting := range info.Settings {
+					if setting.Key == "vcs.revision" {
+						commit = setting.Value
+					}
+				}
+			}
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "plexus version %s built with Go %s (commit: %s)\n", version, goVersion, commit)
 			return err
 		},
 	}
