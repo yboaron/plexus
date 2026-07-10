@@ -1,4 +1,4 @@
-CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
+CONTROLLER_GEN ?= go tool controller-gen
 GOLANGCI_LINT ?= golangci-lint
 
 IMG ?= plexus-controller:latest
