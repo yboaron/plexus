@@ -2,10 +2,6 @@ CONTROLLER_GEN ?= go tool controller-gen
 GOLANGCI_LINT ?= golangci-lint
 
 IMG ?= plexus-controller:latest
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-LDFLAGS = -X github.com/ovn-kubernetes/plexus/pkg/cli.Version=$(VERSION) \
-          -X github.com/ovn-kubernetes/plexus/pkg/cli.GitCommit=$(GIT_COMMIT)
 
 ##@ General
 
@@ -75,7 +71,7 @@ test: ## Run unit tests
 .PHONY: build
 build: ## Build controller and CLI binaries
 	go build -o bin/plexus-controller ./cmd/controller/
-	go build -ldflags "$(LDFLAGS)" -o bin/kubectl-plexus ./cmd/kubectl-plexus/
+	go build -o bin/kubectl-plexus ./cmd/kubectl-plexus/
 	ln -sf kubectl-plexus bin/plexus
 
 .PHONY: run

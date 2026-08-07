@@ -43,7 +43,7 @@
 | `root.go` | Root command, persistent flags, subcommand registration |
 | `client.go` | Shared `getClient()` using kubeconfig/context flags |
 | `validate.go` | Shared CIDR and subnet type validation |
-| `version.go` | Version subcommand (ldflags-injected) |
+| `version.go` | Version subcommand |
 | `create.go` | Create an empty AND |
 | `delete.go` | Delete an AND (with confirmation) |
 | `describe.go` | Rich AND detail view |

@@ -154,7 +154,7 @@ plexus version
 plexus version v0.1.0 (commit: a1b2c3d)
 ```
 
-Version and commit are injected at build time via `ldflags` (see `Makefile`).
+Version and commit are extracted from module information stored in the binary.
 
 ## Using with kubectl
 
