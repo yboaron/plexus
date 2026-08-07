@@ -26,9 +26,11 @@ import (
 const vtepName = "nd-vtep"
 
 // domainRouteTarget returns a shared route target string for all subnets
-// within an AND. Using a wildcard AS (`*`) allows import matching regardless
-// of which ASN originated the route. The local admin portion is a
-// deterministic hash of the AND name (range 1-65535).
+// within an AND. All non-Isolated subnets in the same AND share this RT,
+// enabling intra-domain route leaking via FRR. The wildcard AS (`*`) means
+// "match any AS" for import; OVN-K handles the export RT separately using
+// the cluster's actual ASN. The local admin is a deterministic hash of the
+// AND name (range 1-65535).
 func domainRouteTarget(andName string) string {
 	h := fnv.New32a()
 	h.Write([]byte(andName))
