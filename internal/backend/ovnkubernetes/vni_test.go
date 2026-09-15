@@ -1,11 +1,10 @@
-package ovnkubernetes_test
+package ovnkubernetes
 
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
-	. "github.com/ovn-kubernetes/plexus/internal/backend/ovnkubernetes"
 )
 
 var _ = Describe("VNIAllocator", func() {
