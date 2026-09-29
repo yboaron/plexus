@@ -65,8 +65,8 @@ lint-api: ## Run kube-api-linter on API types
 	fi
 	bin/golangci-lint-kube-api-linter run --config hack/lint/.golangci-api.yml ./api/...
 
-.PHONY: check test unit
-check test unit: ## Run all unit tests. Downloads envtest kube-apiserver/etcd binaries on first run.
+.PHONY: check test
+check test: ## Run all unit tests. Downloads envtest kube-apiserver/etcd binaries on first run.
 	KUBEBUILDER_ASSETS="$$(go tool setup-envtest use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 	go test ./api/... ./internal/... ./pkg/cli/... -coverprofile cover.out -race -v
 

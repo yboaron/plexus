@@ -7,7 +7,38 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  unit-test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # envtest needs a real kube-apiserver + etcd on disk. Cache the download
+      # so only the first run on a given Makefile revision pays for it.
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: bin/k8s
+          key: envtest-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          restore-keys: envtest-${{ runner.os }}-
+
+      - name: Run unit tests
+        run: make check
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+          if-no-files-found: ignore
+
+  build-and-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +57,6 @@ jobs:
 
       - name: Build
         run: make build
-
-      - name: Test
-        run: make test
 
       - name: Lint
         run: make lint
