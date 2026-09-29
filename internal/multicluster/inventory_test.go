@@ -10,6 +10,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Cluster Secrets below live in "default", which kube-apiserver bootstraps, so
+// the suite needs no namespace setup. The inventory leaves Namespace unset and
+// therefore lists across all namespaces, so the namespace is arbitrary here;
+// isolation comes from the label sweep in BeforeEach/AfterEach. A dedicated
+// namespace would not isolate anything and envtest, having no namespace
+// controller, could never finalize its deletion.
 var _ = Describe("SecretInventory", func() {
 	var inv *SecretInventory
 

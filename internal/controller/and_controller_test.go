@@ -231,6 +231,9 @@ var _ = Describe("ANDReconciler", func() {
 			}, timeout, interval).Should(Succeed())
 
 			before := fakeBack.getReconcileCount()
+			// The Secret watch selects on the plexus.io/cluster label rather
+			// than a namespace, so "default" (bootstrapped by kube-apiserver)
+			// is simply a convenient home for the fixture.
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "spoke-cluster",
