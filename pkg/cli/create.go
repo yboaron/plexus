@@ -6,11 +6,12 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
 )
 
-func newCreateCommand() *cobra.Command {
+func newCreateCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create an AdministrativeNetworkDomain",
@@ -22,7 +23,7 @@ Examples:
   plexus create staging`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := clientFn()
 			if err != nil {
 				return err
 			}

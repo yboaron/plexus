@@ -8,11 +8,12 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
 )
 
-func newDeleteCommand() *cobra.Command {
+func newDeleteCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	var yes bool
 
 	cmd := &cobra.Command{
@@ -37,7 +38,7 @@ func newDeleteCommand() *cobra.Command {
 				}
 			}
 
-			c, err := getClient()
+			c, err := clientFn()
 			if err != nil {
 				return err
 			}

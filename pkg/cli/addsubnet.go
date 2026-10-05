@@ -13,7 +13,7 @@ import (
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
 )
 
-func newAddSubnetCommand() *cobra.Command {
+func newAddSubnetCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	var cidrs []string
 	var subnetType string
 	var clusterSelector []string
@@ -62,7 +62,7 @@ Examples:
 				}
 			}
 
-			c, err := getClient()
+			c, err := clientFn()
 			if err != nil {
 				return err
 			}

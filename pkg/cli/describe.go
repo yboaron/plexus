@@ -13,13 +13,13 @@ import (
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
 )
 
-func newDescribeCommand() *cobra.Command {
+func newDescribeCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "describe <name>",
 		Short: "Show details of an AdministrativeNetworkDomain",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := getClient()
+			c, err := clientFn()
 			if err != nil {
 				return err
 			}

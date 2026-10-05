@@ -14,7 +14,7 @@ import (
 	v1beta1 "github.com/ovn-kubernetes/plexus/api/administrativenetworkdomain/v1beta1"
 )
 
-func newDeleteSubnetCommand() *cobra.Command {
+func newDeleteSubnetCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	var yes bool
 
 	cmd := &cobra.Command{
@@ -49,7 +49,7 @@ Examples:
 				}
 			}
 
-			c, err := getClient()
+			c, err := clientFn()
 			if err != nil {
 				return err
 			}

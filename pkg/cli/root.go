@@ -23,11 +23,11 @@ This command can be used standalone or as a kubectl plugin (kubectl plexus).`,
 	cmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to the kubeconfig file")
 	cmd.PersistentFlags().StringVar(&kubecontext, "context", "", "The name of the kubeconfig context to use")
 
-	cmd.AddCommand(newCreateCommand())
-	cmd.AddCommand(newDeleteCommand())
-	cmd.AddCommand(newDescribeCommand())
-	cmd.AddCommand(newAddSubnetCommand())
-	cmd.AddCommand(newDeleteSubnetCommand())
+	cmd.AddCommand(newCreateCommand(getClient))
+	cmd.AddCommand(newDeleteCommand(getClient))
+	cmd.AddCommand(newDescribeCommand(getClient))
+	cmd.AddCommand(newAddSubnetCommand(getClient))
+	cmd.AddCommand(newDeleteSubnetCommand(getClient))
 	cmd.AddCommand(newVersionCommand())
 
 	return cmd
