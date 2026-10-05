@@ -145,6 +145,40 @@ var _ = Describe("SecretInventory", func() {
 		Expect(matched).To(HaveLen(1))
 		Expect(matched[0].Name).To(Equal("spoke-east"))
 	})
+
+	It("drops a spoke cluster once its Secret is deleted", func() {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "spoke-west",
+				Namespace: "default",
+				Labels:    map[string]string{LabelCluster: "true", "region": "us-west"},
+			},
+			Data: map[string][]byte{SecretDataKey: kubeconfigFromRest(testCfg)},
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+		Expect(inv.Sync(ctx)).To(Succeed())
+		_, err := inv.GetCluster("spoke-west")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		Expect(inv.Sync(ctx)).To(Succeed())
+
+		_, err = inv.GetCluster("spoke-west")
+		Expect(err).To(MatchError(ContainSubstring("not found")))
+
+		// Only the hub is left, and it never matches the spoke's labels.
+		all, err := inv.AllClusters()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all).To(HaveLen(1))
+		Expect(all[0].Name).To(Equal(hubClusterName))
+
+		matched, err := inv.MatchClusters(&metav1.LabelSelector{
+			MatchLabels: map[string]string{"region": "us-west"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(matched).To(BeEmpty())
+	})
 })
 
 var _ = Describe("clusterLabelsFromSecret", func() {

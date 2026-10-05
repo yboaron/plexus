@@ -15,18 +15,25 @@ var _ = Describe("subnet.go", func() {
 		})
 	})
 
-	Describe("desiredLabels", func() {
-		It("sets plexus and primary-UDN labels", func() {
+	// The label set is identical for every subnet type apart from
+	// labelSubnetType, so the table doubles as a guard: a new SubnetType
+	// that needs different labels will have to touch this test.
+	DescribeTable("desiredLabels sets plexus and primary-UDN labels",
+		func(subnetType andv1beta1.SubnetType) {
 			and := testAND("prod")
-			subnet := testSubnet("web", "10.0.1.0/24", andv1beta1.SubnetTypePrivate)
+			subnet := testSubnet("web", "10.0.1.0/24", subnetType)
 			Expect(desiredLabels(and, subnet)).To(Equal(map[string]string{
 				labelNetworkDomain: "prod",
 				labelSubnet:        "web",
-				labelSubnetType:    string(andv1beta1.SubnetTypePrivate),
+				labelSubnetType:    string(subnetType),
 				labelPrimaryUDN:    "",
 			}))
-		})
-	})
+		},
+		Entry("Public", andv1beta1.SubnetTypePublic),
+		Entry("Private", andv1beta1.SubnetTypePrivate),
+		Entry("Isolated", andv1beta1.SubnetTypeIsolated),
+		Entry("VPNOnly", andv1beta1.SubnetTypeVPNOnly),
+	)
 
 	Describe("nodeSelectorAnnotationValue", func() {
 		It("returns empty when no AZ or node selector is set", func() {

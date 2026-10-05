@@ -116,6 +116,30 @@ var _ = Describe("AdministrativeNetworkDomain", func() {
 		Expect(k8sClient.Create(ctx, created)).To(Succeed())
 	})
 
+	It("accepts an AND with no subnets", func() {
+		// Subnets is optional and carries no MinItems: an empty AND is a
+		// valid, if inert, domain. The controller reports it as
+		// Ready=False/NoSubnets rather than the API server rejecting it.
+		created = &AdministrativeNetworkDomain{
+			ObjectMeta: metav1.ObjectMeta{Name: "and-crd-no-subnets"},
+			Spec:       AdministrativeNetworkDomainSpec{},
+		}
+		Expect(k8sClient.Create(ctx, created)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(created), created)).To(Succeed())
+		Expect(created.Spec.Subnets).To(BeEmpty())
+	})
+
+	It("accepts an AND with an explicitly empty subnet list", func() {
+		created = &AdministrativeNetworkDomain{
+			ObjectMeta: metav1.ObjectMeta{Name: "and-crd-empty-subnets"},
+			Spec: AdministrativeNetworkDomainSpec{
+				Subnets: []Subnet{},
+			},
+		}
+		Expect(k8sClient.Create(ctx, created)).To(Succeed())
+	})
+
 	It("accepts dual-stack CIDRs on a subnet", func() {
 		created = &AdministrativeNetworkDomain{
 			ObjectMeta: metav1.ObjectMeta{Name: "and-crd-dualstack"},

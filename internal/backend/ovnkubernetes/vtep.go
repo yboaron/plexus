@@ -91,12 +91,23 @@ func (b *OVNKubernetesBackend) deleteVTEP(ctx context.Context, deletingAND strin
 	return nil
 }
 
+// cidrsEqual reports whether two CIDR lists carry the same CIDRs.
+// VTEP.Spec.CIDRs is a set in all but name — the order carries no meaning —
+// so reordering VTEPCIDRs in the Plexus config must not count as drift and
+// trigger an Update on every reconcile. Duplicates are compared by
+// multiplicity so that a list is never considered equal to one holding a
+// different number of copies of the same CIDR.
 func cidrsEqual(a []vtepv1.CIDR, b []vtepv1.CIDR) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	counts := make(map[vtepv1.CIDR]int, len(a))
+	for _, c := range a {
+		counts[c]++
+	}
+	for _, c := range b {
+		counts[c]--
+		if counts[c] < 0 {
 			return false
 		}
 	}

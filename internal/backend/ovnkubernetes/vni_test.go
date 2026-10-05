@@ -57,6 +57,16 @@ var _ = Describe("VNIAllocator", func() {
 			})
 		})
 
+		Context("for a VPNOnly subnet", func() {
+			It("returns both MACVRF and IPVRF VNIs", func() {
+				vnis, err := allocator.AllocateSubnetVNIs(and, "subnet-a", v1beta1.SubnetTypeVPNOnly)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(vnis.MACVRF).To(BeNumerically(">=", vniMin))
+				Expect(vnis.IPVRF).To(BeNumerically(">=", vniMin))
+				Expect(vnis.MACVRF).NotTo(Equal(vnis.IPVRF))
+			})
+		})
+
 		Context("idempotency", func() {
 			It("returns the same VNIs when called twice for the same subnet", func() {
 				v1, err := allocator.AllocateSubnetVNIs(and, "subnet-a", v1beta1.SubnetTypePublic)
@@ -104,18 +114,60 @@ var _ = Describe("VNIAllocator", func() {
 		})
 
 		It("allows re-allocation after release", func() {
-			v1, err := allocator.AllocateSubnetVNIs(and, "subnet-a", v1beta1.SubnetTypePublic)
+			_, err := allocator.AllocateSubnetVNIs(and, "subnet-a", v1beta1.SubnetTypePublic)
 			Expect(err).NotTo(HaveOccurred())
 
 			allocator.ReleaseSubnetVNIs(and, "subnet-a")
 
+			// The bitmap is round-robin, so the re-allocated VNIs are not
+			// required to be the ones just freed — only to be a fresh,
+			// valid, non-overlapping pair. That the freed slots really do
+			// return to the pool is pinned down by the idAllocator spec
+			// below, where the pool is small enough to make it observable.
 			v2, err := allocator.AllocateSubnetVNIs(and, "subnet-a", v1beta1.SubnetTypePublic)
 			Expect(err).NotTo(HaveOccurred())
-
-			// After release and re-alloc the VNIs may differ; just verify they are valid.
 			Expect(v2.MACVRF).To(BeNumerically(">=", vniMin))
-			_ = v1
+			Expect(v2.IPVRF).To(BeNumerically(">=", vniMin))
+			Expect(v2.MACVRF).NotTo(Equal(v2.IPVRF))
 		})
 	})
 
+})
+
+var _ = Describe("idAllocator", func() {
+	const offset = 4096
+
+	// A two-slot pool makes exhaustion and slot reuse directly observable;
+	// the real VNI pool is 2^24 wide, so neither is reachable there.
+	It("returns a released ID to the pool", func() {
+		a := newIDAllocator("tiny", 2, offset)
+
+		first, err := a.AllocateID("a")
+		Expect(err).NotTo(HaveOccurred())
+		second, err := a.AllocateID("b")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(first).NotTo(Equal(second))
+
+		_, err = a.AllocateID("c")
+		Expect(err).To(MatchError(ContainSubstring("pool exhausted")))
+
+		a.ReleaseID("a")
+
+		// Only one slot is free, so the allocator has no choice but to
+		// hand back exactly the ID that was released.
+		reused, err := a.AllocateID("c")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reused).To(Equal(first))
+	})
+
+	It("rejects reserving an ID that another key already holds", func() {
+		a := newIDAllocator("tiny", 2, offset)
+
+		Expect(a.ReserveID("a", offset)).To(Succeed())
+		// Reserving the same ID for the same key stays idempotent.
+		Expect(a.ReserveID("a", offset)).To(Succeed())
+
+		Expect(a.ReserveID("b", offset)).To(MatchError(ContainSubstring("already reserved")))
+		Expect(a.ReserveID("a", offset+1)).To(MatchError(ContainSubstring("already allocated")))
+	})
 })

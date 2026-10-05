@@ -58,7 +58,12 @@ var _ = Describe("cudn.go", func() {
 			Expect(cudn.Labels).To(HaveKeyWithValue(labelNetworkDomain, "prod"))
 			Expect(cudn.Labels).To(HaveKeyWithValue(labelSubnet, "web"))
 			Expect(cudn.Labels).To(HaveKeyWithValue(labelSubnetType, string(andv1beta1.SubnetTypePublic)))
-			Expect(cudn.Spec.NamespaceSelector.MatchLabels).To(HaveKeyWithValue(labelSubnet, "web"))
+			// Both labels matter: labelSubnet alone would also select the
+			// same-named subnet of a different AND.
+			Expect(cudn.Spec.NamespaceSelector.MatchLabels).To(SatisfyAll(
+				HaveKeyWithValue(labelNetworkDomain, "prod"),
+				HaveKeyWithValue(labelSubnet, "web"),
+			))
 			Expect(cudn.Spec.Network.Topology).To(Equal(udnv1.NetworkTopologyLayer2))
 			Expect(cudn.Spec.Network.Transport).To(Equal(udnv1.TransportOptionEVPN))
 			Expect(cudn.Spec.Network.Layer2.Role).To(Equal(udnv1.NetworkRolePrimary))

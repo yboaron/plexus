@@ -185,6 +185,15 @@ func cleanupClusterResources() {
 	_ = k8sClient.DeleteAllOf(ctx, &rav1.RouteAdvertisements{})
 	_ = k8sClient.DeleteAllOf(ctx, &vtepv1.VTEP{})
 
+	// Namespaces are requested for deletion but never actually disappear:
+	// envtest runs only kube-apiserver and etcd, with no namespace
+	// controller to drain contents and drop the "kubernetes" finalizer, so
+	// every namespace stays Terminating for the lifetime of the suite.
+	// Waiting for deletion here would therefore hang until timeout. Specs
+	// keep isolation by giving each AND a unique name (see uniqueName), so
+	// leftover namespaces from a previous spec can never collide; the
+	// delete below is housekeeping, and assertions about namespace removal
+	// use namespaceDeletedOrTerminating instead of IsNotFound.
 	var nsList corev1.NamespaceList
 	if err := k8sClient.List(ctx, &nsList, client.HasLabels{labelNetworkDomain}); err == nil {
 		for i := range nsList.Items {
@@ -288,7 +297,10 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cudn.Labels).To(HaveKeyWithValue(labelNetworkDomain, and.Name))
 			Expect(cudn.Labels).To(HaveKeyWithValue(labelSubnet, "web"))
-			Expect(cudn.Spec.NamespaceSelector.MatchLabels).To(HaveKeyWithValue(labelSubnet, "web"))
+			Expect(cudn.Spec.NamespaceSelector.MatchLabels).To(SatisfyAll(
+				HaveKeyWithValue(labelNetworkDomain, and.Name),
+				HaveKeyWithValue(labelSubnet, "web"),
+			))
 			Expect(cudn.Spec.Network.Topology).To(Equal(udnv1.NetworkTopologyLayer2))
 			Expect(cudn.Spec.Network.Transport).To(Equal(udnv1.TransportOptionEVPN))
 			Expect(cudn.Spec.Network.Layer2).NotTo(BeNil())
@@ -405,11 +417,16 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			sel := ra.Spec.NetworkSelectors[0].ClusterUserDefinedNetworkSelector
 			Expect(sel).NotTo(BeNil())
 			Expect(sel.NetworkSelector.MatchLabels).To(HaveKeyWithValue(labelNetworkDomain, and.Name))
-			Expect(sel.NetworkSelector.MatchExpressions).To(ContainElement(metav1.LabelSelectorRequirement{
-				Key:      labelSubnetType,
-				Operator: metav1.LabelSelectorOpIn,
-				Values:   []string{string(andv1beta1.SubnetTypePublic), string(andv1beta1.SubnetTypePrivate)},
-			}))
+			Expect(sel.NetworkSelector.MatchExpressions).To(HaveLen(1))
+			req := sel.NetworkSelector.MatchExpressions[0]
+			Expect(req.Key).To(Equal(labelSubnetType))
+			Expect(req.Operator).To(Equal(metav1.LabelSelectorOpIn))
+			// Values is a set as far as the selector is concerned, so the
+			// order it is built in must not make this assertion fail.
+			Expect(req.Values).To(ConsistOf(
+				string(andv1beta1.SubnetTypePublic),
+				string(andv1beta1.SubnetTypePrivate),
+			))
 		})
 
 		It("does not create RouteAdvertisements when every subnet is Isolated", func() {
@@ -480,7 +497,10 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			result, err := b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal("VTEPNotReady"))
+			Expect(result.StatusReason).To(Equal(reasonVTEPNotReady))
+			Expect(result.StatusMessage).To(Equal(
+				fmt.Sprintf(msgFmtVTEPNotReady, "hub", msgVTEPNotAccepted),
+			))
 		})
 
 		It("reports SubnetsNotReady until CUDNs and RouteAdvertisements are accepted", func() {
@@ -493,15 +513,19 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			result, err := b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
-			Expect(result.StatusMessage).To(ContainSubstring("CUDN"))
+			Expect(result.StatusReason).To(Equal(reasonSubnetsNotReady))
+			Expect(result.StatusMessage).To(Equal(
+				fmt.Sprintf(msgFmtCUDNNotReady, "hub", nsName(and.Name, "web"), msgCUDNNotCreated),
+			))
 
 			markCUDNReady(nsName(and.Name, "web"))
 			result, err = b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
-			Expect(result.StatusMessage).To(ContainSubstring("RouteAdvertisements"))
+			Expect(result.StatusReason).To(Equal(reasonSubnetsNotReady))
+			Expect(result.StatusMessage).To(Equal(
+				fmt.Sprintf(msgFmtRANotAccepted, "hub", and.Name, msgRANotYetAccepted),
+			))
 
 			markRAAccepted(and.Name)
 			result, err = b.Reconcile(ctx, and)
