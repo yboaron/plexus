@@ -9,9 +9,10 @@ import (
 
 func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "version",
-		Short: "Print the plexus CLI version",
-		Args:  cobra.NoArgs,
+		Use:          "version",
+		Short:        "Print the plexus CLI version",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			info, ok := debug.ReadBuildInfo()
 			version := "dev"

@@ -27,7 +27,8 @@ associated with the subnet.
 Examples:
   plexus delete-subnet production web
   plexus delete-subnet production web --yes`,
-		Args: cobra.ExactArgs(2),
+		Args:         cobra.ExactArgs(2),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ndName := args[0]
 			subnetName := args[1]

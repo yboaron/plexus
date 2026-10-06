@@ -15,9 +15,10 @@ import (
 
 func newDescribeCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:   "describe <name>",
-		Short: "Show details of an AdministrativeNetworkDomain",
-		Args:  cobra.ExactArgs(1),
+		Use:          "describe <name>",
+		Short:        "Show details of an AdministrativeNetworkDomain",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFn()
 			if err != nil {

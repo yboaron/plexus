@@ -29,7 +29,8 @@ Examples:
   plexus add-subnet production backend --cidr 10.0.2.0/24
   plexus add-subnet production dual --cidr 10.0.3.0/24 --cidr fd00::3/64 --type Private
   plexus add-subnet production zoned --cidr 10.0.4.0/24 --cluster-selector region=eu-west --node-selector topology.kubernetes.io/zone=rack-a`,
-		Args: cobra.ExactArgs(2),
+		Args:         cobra.ExactArgs(2),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ndName := args[0]
 			subnetName := args[1]

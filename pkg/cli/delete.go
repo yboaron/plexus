@@ -17,9 +17,10 @@ func newDeleteCommand(clientFn func() (client.Client, error)) *cobra.Command {
 	var yes bool
 
 	cmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete an AdministrativeNetworkDomain and all its subnets",
-		Args:  cobra.ExactArgs(1),
+		Use:          "delete <name>",
+		Short:        "Delete an AdministrativeNetworkDomain and all its subnets",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 

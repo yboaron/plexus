@@ -21,7 +21,8 @@ Use 'plexus add-subnet' to add subnets after creation.
 Examples:
   plexus create production
   plexus create staging`,
-		Args: cobra.ExactArgs(1),
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFn()
 			if err != nil {
