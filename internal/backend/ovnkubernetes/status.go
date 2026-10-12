@@ -17,26 +17,6 @@ import (
 	"github.com/ovn-kubernetes/plexus/internal/multicluster"
 )
 
-// Status reasons surfaced on the AND's Ready condition.
-const (
-	reasonVTEPNotReady    = "VTEPNotReady"
-	reasonSubnetsNotReady = "SubnetsNotReady"
-)
-
-// Status message formats and the placeholder detail used when a child
-// resource has not published the condition we are waiting on yet. Shared
-// with the tests so assertions can match the message exactly rather than
-// on a substring.
-const (
-	msgFmtVTEPNotReady  = "cluster %q: %s"
-	msgFmtCUDNNotReady  = "cluster %q: CUDN %q not ready: %s"
-	msgFmtRANotAccepted = "cluster %q: RouteAdvertisements %q not accepted: %s"
-
-	msgVTEPNotAccepted  = "VTEP not yet accepted"
-	msgCUDNNotCreated   = "network not yet created"
-	msgRANotYetAccepted = "RouteAdvertisements not yet accepted"
-)
-
 // checkResourceStatus inspects the status conditions of all child resources
 // (VTEP, CUDNs, RouteAdvertisements) across all clusters and returns a Result
 // indicating whether the AND should be marked as not-ready.
@@ -56,14 +36,14 @@ func (b *OVNKubernetesBackend) checkClusterResourceStatus(ctx context.Context, a
 	}
 	cond := apimeta.FindStatusCondition(vtep.Status.Conditions, "Accepted")
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		msg := msgVTEPNotAccepted
+		msg := "VTEP not yet accepted"
 		if cond != nil {
 			msg = cond.Message
 		}
 		return backend.Result{
 			Requeue:       true,
-			StatusReason:  reasonVTEPNotReady,
-			StatusMessage: fmt.Sprintf(msgFmtVTEPNotReady, clusterName, msg),
+			StatusReason:  "VTEPNotReady",
+			StatusMessage: fmt.Sprintf("cluster %q: %s", clusterName, msg),
 		}, nil
 	}
 
@@ -75,14 +55,14 @@ func (b *OVNKubernetesBackend) checkClusterResourceStatus(ctx context.Context, a
 		}
 		cond := apimeta.FindStatusCondition(cudn.Status.Conditions, "NetworkCreated")
 		if cond == nil || cond.Status != metav1.ConditionTrue {
-			msg := msgCUDNNotCreated
+			msg := "network not yet created"
 			if cond != nil {
 				msg = cond.Message
 			}
 			return backend.Result{
 				Requeue:       true,
-				StatusReason:  reasonSubnetsNotReady,
-				StatusMessage: fmt.Sprintf(msgFmtCUDNNotReady, clusterName, name, msg),
+				StatusReason:  "SubnetsNotReady",
+				StatusMessage: fmt.Sprintf("cluster %q: CUDN %q not ready: %s", clusterName, name, msg),
 			}, nil
 		}
 	}
@@ -102,14 +82,14 @@ func (b *OVNKubernetesBackend) checkClusterResourceStatus(ctx context.Context, a
 		}
 		cond := apimeta.FindStatusCondition(ra.Status.Conditions, "Accepted")
 		if cond == nil || cond.Status != metav1.ConditionTrue {
-			msg := msgRANotYetAccepted
+			msg := "RouteAdvertisements not yet accepted"
 			if cond != nil {
 				msg = cond.Message
 			}
 			return backend.Result{
 				Requeue:       true,
-				StatusReason:  reasonSubnetsNotReady,
-				StatusMessage: fmt.Sprintf(msgFmtRANotAccepted, clusterName, name, msg),
+				StatusReason:  "SubnetsNotReady",
+				StatusMessage: fmt.Sprintf("cluster %q: RouteAdvertisements %q not accepted: %s", clusterName, name, msg),
 			}, nil
 		}
 	}

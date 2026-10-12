@@ -202,6 +202,45 @@ func cleanupClusterResources() {
 	}
 }
 
+// Test constants for common subnet configurations
+const (
+	testSubnetWeb    = "web"
+	testSubnetDB     = "db"
+	testCIDRWeb      = "10.0.1.0/24"
+	testCIDRDB       = "10.0.2.0/24"
+	testCIDRIsolated = "10.0.20.0/24"
+	testCIDRIPv6     = "fd00:10::/64"
+	testCIDRIPv6Alt  = "fd00:20::/64"
+)
+
+// reconcileNewAND creates a new backend, AND, and performs initial reconciliation.
+// This helper reduces duplication in status check tests.
+func reconcileNewAND(subnetType andv1beta1.SubnetType) (*OVNKubernetesBackend, *andv1beta1.AdministrativeNetworkDomain, error) {
+	b := newBackend()
+	and := makeAND(uniqueName("and"), makeSubnet(testSubnetWeb, testCIDRWeb, subnetType))
+	_, err := b.Reconcile(ctx, and)
+	return b, and, err
+}
+
+// setConditionFalse is a helper to set a status condition to False on various resource types.
+func setConditionFalse(obj client.Object, condType, reason, message string) {
+	cond := metav1.Condition{
+		Type:    condType,
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: message,
+	}
+
+	switch v := obj.(type) {
+	case *vtepv1.VTEP:
+		apimeta.SetStatusCondition(&v.Status.Conditions, cond)
+	case *udnv1.ClusterUserDefinedNetwork:
+		apimeta.SetStatusCondition(&v.Status.Conditions, cond)
+	case *rav1.RouteAdvertisements:
+		apimeta.SetStatusCondition(&v.Status.Conditions, cond)
+	}
+}
+
 var _ = Describe("OVNKubernetesBackend", func() {
 	It("returns ovn-kubernetes from Name", func() {
 		b := New(nil, logr.Discard(), defaultOVNConfig(), &staticInventory{})
@@ -397,6 +436,59 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			Expect(updated.Spec.Network.EVPN.MACVRF.VNI).To(Equal(macVNI))
 			Expect(updated.Spec.Network.EVPN.IPVRF.VNI).To(Equal(ipVNI))
 		})
+
+		It("creates a CUDN with IPv6-only subnet", func() {
+			b := newBackend()
+			subnet := makeSubnet("ipv6-net", testCIDRIPv6, andv1beta1.SubnetTypePublic)
+			and := makeAND(uniqueName("and"), subnet)
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconciling AND with IPv6-only subnet should succeed")
+
+			cudn, err := getCUDN(nsName(and.Name, "ipv6-net"))
+			Expect(err).NotTo(HaveOccurred(), "CUDN should be created for IPv6 subnet")
+			Expect(cudn.Spec.Network.Layer2.Subnets).To(ConsistOf(udnv1.CIDR(testCIDRIPv6)),
+				"CUDN should contain the IPv6 CIDR")
+			Expect(cudn.Spec.Network.EVPN.MACVRF).NotTo(BeNil(), "MACVRF should be allocated for IPv6")
+			Expect(cudn.Spec.Network.EVPN.IPVRF).NotTo(BeNil(), "IPVRF should be allocated for IPv6")
+		})
+
+		It("creates a CUDN with dual-stack (IPv4+IPv6) subnet", func() {
+			b := newBackend()
+			subnet := andv1beta1.Subnet{
+				Name:  "dual-stack",
+				CIDRs: []andv1beta1.CIDR{andv1beta1.CIDR(testCIDRWeb), andv1beta1.CIDR(testCIDRIPv6)},
+				Type:  andv1beta1.SubnetTypePublic,
+			}
+			and := makeAND(uniqueName("and"), subnet)
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconciling AND with dual-stack subnet should succeed")
+
+			cudn, err := getCUDN(nsName(and.Name, "dual-stack"))
+			Expect(err).NotTo(HaveOccurred(), "CUDN should be created for dual-stack subnet")
+			Expect(cudn.Spec.Network.Layer2.Subnets).To(ConsistOf(
+				udnv1.CIDR(testCIDRWeb),
+				udnv1.CIDR(testCIDRIPv6),
+			), "CUDN should contain both IPv4 and IPv6 CIDRs")
+			Expect(cudn.Spec.Network.EVPN.MACVRF).NotTo(BeNil(), "MACVRF should be allocated for dual-stack")
+			Expect(cudn.Spec.Network.EVPN.IPVRF).NotTo(BeNil(), "IPVRF should be allocated for dual-stack")
+		})
+
+		It("creates namespace labels correctly for IPv6 subnet", func() {
+			b := newBackend()
+			subnet := makeSubnet("ipv6-subnet", testCIDRIPv6, andv1beta1.SubnetTypePrivate)
+			and := makeAND(uniqueName("and"), subnet)
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconciling AND with IPv6 subnet should succeed")
+
+			ns, err := getNamespace(nsName(and.Name, "ipv6-subnet"))
+			Expect(err).NotTo(HaveOccurred(), "namespace should be created for IPv6 subnet")
+			Expect(ns.Labels).To(HaveKeyWithValue(labelNetworkDomain, and.Name),
+				"namespace should have network domain label")
+			Expect(ns.Labels).To(HaveKeyWithValue(labelSubnet, "ipv6-subnet"),
+				"namespace should have subnet label")
+			Expect(ns.Labels).To(HaveKeyWithValue(labelSubnetType, string(andv1beta1.SubnetTypePrivate)),
+				"namespace should have correct subnet type label")
+		})
 	})
 
 	Describe("RouteAdvertisements", func() {
@@ -456,6 +548,38 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			_, err = getRA(and.Name)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		})
+
+		It("creates RouteAdvertisements for IPv6 Public subnet", func() {
+			b := newBackend()
+			subnet := makeSubnet("ipv6-public", testCIDRIPv6, andv1beta1.SubnetTypePublic)
+			and := makeAND(uniqueName("and"), subnet)
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconciling AND with IPv6 Public subnet should succeed")
+
+			ra, err := getRA(and.Name)
+			Expect(err).NotTo(HaveOccurred(), "RouteAdvertisements should be created for IPv6 Public subnet")
+			Expect(ra.Labels).To(HaveKeyWithValue(labelNetworkDomain, and.Name),
+				"RouteAdvertisements should reference the AND")
+			Expect(ra.Spec.NetworkSelectors).To(HaveLen(1),
+				"RouteAdvertisements should select CUDNs for IPv6 subnet")
+		})
+
+		It("creates RouteAdvertisements for dual-stack Public subnet", func() {
+			b := newBackend()
+			subnet := andv1beta1.Subnet{
+				Name:  "dual-public",
+				CIDRs: []andv1beta1.CIDR{andv1beta1.CIDR(testCIDRWeb), andv1beta1.CIDR(testCIDRIPv6)},
+				Type:  andv1beta1.SubnetTypePublic,
+			}
+			and := makeAND(uniqueName("and"), subnet)
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconciling AND with dual-stack Public subnet should succeed")
+
+			ra, err := getRA(and.Name)
+			Expect(err).NotTo(HaveOccurred(), "RouteAdvertisements should be created for dual-stack subnet")
+			Expect(ra.Spec.Advertisements).To(ContainElement(rav1.PodNetwork),
+				"RouteAdvertisements should advertise pod networks for dual-stack")
+		})
 	})
 
 	Describe("VTEP", func() {
@@ -497,10 +621,8 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			result, err := b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal(reasonVTEPNotReady))
-			Expect(result.StatusMessage).To(Equal(
-				fmt.Sprintf(msgFmtVTEPNotReady, "hub", msgVTEPNotAccepted),
-			))
+			Expect(result.StatusReason).To(Equal("VTEPNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("VTEP not yet accepted"))
 		})
 
 		It("reports SubnetsNotReady until CUDNs and RouteAdvertisements are accepted", func() {
@@ -513,19 +635,15 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			result, err := b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal(reasonSubnetsNotReady))
-			Expect(result.StatusMessage).To(Equal(
-				fmt.Sprintf(msgFmtCUDNNotReady, "hub", nsName(and.Name, "web"), msgCUDNNotCreated),
-			))
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("network not yet created"))
 
 			markCUDNReady(nsName(and.Name, "web"))
 			result, err = b.Reconcile(ctx, and)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Requeue).To(BeTrue())
-			Expect(result.StatusReason).To(Equal(reasonSubnetsNotReady))
-			Expect(result.StatusMessage).To(Equal(
-				fmt.Sprintf(msgFmtRANotAccepted, "hub", and.Name, msgRANotYetAccepted),
-			))
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("RouteAdvertisements not yet accepted"))
 
 			markRAAccepted(and.Name)
 			result, err = b.Reconcile(ctx, and)
@@ -638,6 +756,187 @@ var _ = Describe("OVNKubernetesBackend resources", func() {
 			// Shared VTEP is still reconciled on every cluster in the inventory.
 			_, err = getVTEP()
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("Status Checking", func() {
+		It("returns VTEPNotReady when VTEP Accepted condition is missing", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			// VTEP exists but has no status conditions
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with VTEP not ready")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("VTEPNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("VTEP not yet accepted"))
+		})
+
+		It("returns VTEPNotReady when VTEP Accepted=False", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			vtep, err := getVTEP()
+			Expect(err).NotTo(HaveOccurred(), "VTEP should exist after reconciliation")
+			setConditionFalse(vtep, "Accepted", "InvalidConfig", "VTEP configuration is invalid")
+			Expect(k8sClient.Status().Update(ctx, vtep)).To(Succeed(), "updating VTEP status should succeed")
+
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with VTEP not accepted")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("VTEPNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("VTEP configuration is invalid"))
+		})
+
+		It("returns SubnetsNotReady when CUDN NetworkCreated condition is missing", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+			markVTEPAccepted()
+
+			// CUDN exists but has no NetworkCreated condition
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with CUDN not ready")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("network not yet created"))
+		})
+
+		It("returns SubnetsNotReady when CUDN NetworkCreated=False", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+			markVTEPAccepted()
+
+			cudn, err := getCUDN(nsName(and.Name, testSubnetWeb))
+			Expect(err).NotTo(HaveOccurred(), "CUDN should exist after reconciliation")
+			setConditionFalse(cudn, "NetworkCreated", "CreationFailed", "failed to create network resources")
+			Expect(k8sClient.Status().Update(ctx, cudn)).To(Succeed(), "updating CUDN status should succeed")
+
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with CUDN creation failed")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("failed to create network resources"))
+		})
+
+		It("returns SubnetsNotReady when RouteAdvertisements Accepted condition is missing", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+			markVTEPAccepted()
+			markCUDNReady(nsName(and.Name, testSubnetWeb))
+
+			// RouteAdvertisements exists but has no Accepted condition
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with RA not ready")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("RouteAdvertisements not yet accepted"))
+		})
+
+		It("returns SubnetsNotReady when RouteAdvertisements Accepted=False", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+			markVTEPAccepted()
+			markCUDNReady(nsName(and.Name, testSubnetWeb))
+
+			ra, err := getRA(raName(and))
+			Expect(err).NotTo(HaveOccurred(), "RouteAdvertisements should exist after reconciliation")
+			setConditionFalse(ra, rav1.RouteAdvertisementsAccepted, "InvalidAdvertisement", "route advertisement configuration is invalid")
+			Expect(k8sClient.Status().Update(ctx, ra)).To(Succeed(), "updating RouteAdvertisements status should succeed")
+
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed even with RA not accepted")
+			Expect(result.Requeue).To(BeTrue())
+			Expect(result.StatusReason).To(Equal("SubnetsNotReady"))
+			Expect(result.StatusMessage).To(ContainSubstring("route advertisement configuration is invalid"))
+		})
+
+		It("returns ready status when all resources are ready", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			// Mark all resources as ready
+			markVTEPAccepted()
+			markCUDNReady(nsName(and.Name, testSubnetWeb))
+			markRAAccepted(raName(and))
+
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed when all resources ready")
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.StatusReason).To(BeEmpty())
+			Expect(result.StatusMessage).To(BeEmpty())
+		})
+
+		It("recreates VTEP if deleted", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			// Delete VTEP
+			vtep, err := getVTEP()
+			Expect(err).NotTo(HaveOccurred(), "VTEP should exist after initial reconciliation")
+			Expect(k8sClient.Delete(ctx, vtep)).To(Succeed(), "deleting VTEP should succeed")
+
+			// Reconcile should recreate it
+			_, err = b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should recreate deleted VTEP")
+
+			vtep, err = getVTEP()
+			Expect(err).NotTo(HaveOccurred(), "VTEP should exist after recreation")
+			Expect(vtep.Spec.CIDRs).To(Equal([]vtepv1.CIDR{"172.18.0.0/16"}))
+		})
+
+		It("recreates CUDN if deleted", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			// Delete CUDN
+			cudn, err := getCUDN(nsName(and.Name, testSubnetWeb))
+			Expect(err).NotTo(HaveOccurred(), "CUDN should exist after initial reconciliation")
+			Expect(k8sClient.Delete(ctx, cudn)).To(Succeed(), "deleting CUDN should succeed")
+
+			// Reconcile should recreate it
+			_, err = b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should recreate deleted CUDN")
+
+			cudn, err = getCUDN(nsName(and.Name, testSubnetWeb))
+			Expect(err).NotTo(HaveOccurred(), "CUDN should exist after recreation")
+			Expect(cudn.Spec.Network.Topology).To(Equal(udnv1.NetworkTopologyLayer2))
+		})
+
+		It("recreates RouteAdvertisements if deleted", func() {
+			b, and, err := reconcileNewAND(andv1beta1.SubnetTypePublic)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			// Delete RouteAdvertisements
+			ra, err := getRA(raName(and))
+			Expect(err).NotTo(HaveOccurred(), "RouteAdvertisements should exist after initial reconciliation")
+			Expect(k8sClient.Delete(ctx, ra)).To(Succeed(), "deleting RouteAdvertisements should succeed")
+
+			// Reconcile should recreate it
+			_, err = b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should recreate deleted RouteAdvertisements")
+
+			ra, err = getRA(raName(and))
+			Expect(err).NotTo(HaveOccurred(), "RouteAdvertisements should exist after recreation")
+			Expect(ra.Name).To(Equal(raName(and)))
+		})
+
+		It("does not check RouteAdvertisements for Isolated-only ANDs", func() {
+			b := newBackend()
+			and := makeAND(uniqueName("and"), makeSubnet(testSubnetDB, testCIDRIsolated, andv1beta1.SubnetTypeIsolated))
+			_, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "initial reconciliation should succeed")
+
+			markVTEPAccepted()
+			markCUDNReady(nsName(and.Name, testSubnetDB))
+
+			// No RouteAdvertisements should be created for Isolated subnets
+			_, err = getRA(raName(and))
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "RouteAdvertisements should not exist for Isolated subnet")
+
+			// Status check should succeed without checking RA
+			result, err := b.Reconcile(ctx, and)
+			Expect(err).NotTo(HaveOccurred(), "reconcile should succeed for Isolated subnet without RA")
+			Expect(result.Requeue).To(BeFalse())
 		})
 	})
 })
